@@ -5,19 +5,18 @@
 - `frontend/` is for the TypeScript client and future Next.js app. It has no package manifest yet.
 - `firmware/` is for Raspberry Pi C/C++ code. The intended style is Google-based, with two-space indentation and a 100-column limit.
 - `database/schema.sql` defines the database schema; `database/reset-db.sh` applies it to the development database.
-- `.devcontainer/` contains the Compose services, image build, lifecycle scripts, and two configurations: the regular development computer setup and the Pi hardware setup.
+- `docker-compose.yaml` defines the local PostgreSQL/pgvector and Ollama services.
 
 ## Build, Test, and Development
 
-- In VS Code, open the repository and choose **Dev Containers: Reopen in Container** for regular development.
-- For GPIO access on a Raspberry Pi over Remote SSH, follow the Pi workflow in `README.md` and use `.devcontainer/devcontainer.pi.json`.
-- Run `./database/reset-db.sh` from the workspace to drop and recreate the development schema. This is destructive; confirm `DATABASE_URL` points to the intended development database first.
+- Start the database and model services from the repository root with `docker compose up -d`; see `README.md` for model and memory settings.
+- Run `./database/reset-db.sh` from a host Bash shell to drop and recreate the Compose database schema. This is destructive; confirm the Compose `.env` database settings point to the intended development database first. The script starts `rag-db` if needed and uses Docker Compose to run `psql`, so host `psql` is not required.
 - Build the firmware from the repository root with `cmake -S firmware -B build/firmware && cmake --build build/firmware`.
 
 ## Coding Style & Naming
 
 - Use Google-style C/C++ formatting with two-space indentation and a 100-column limit; keep active `clang-format` rules in `firmware/.clang-format` (for example, `clang-format -i firmware/src/main.cpp`).
-- Keep frontend formatting and lint rules in the frontend project configuration when it is created; the container provides ESLint and Prettier editor extensions.
+- Keep frontend formatting and lint rules in the frontend project configuration when it is created.
 - Use descriptive names and keep source files with their corresponding frontend, firmware, or database component.
 
 ## Testing Guidelines

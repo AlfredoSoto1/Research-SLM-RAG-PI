@@ -1,37 +1,66 @@
 # slm-rag-pi
 
-## Development environment
+## Docker Compose stack
 
-Open this repository in a Dev Container. Dev Container Features install Node.js 24, the latest TypeScript 7.x compiler, and Git. The Dockerfile installs the C/C++ build and Raspberry Pi hardware libraries plus PostgreSQL client tools. PostgreSQL 17 with pgvector runs as a Compose service.
+The root `docker-compose.yaml` starts two services:
 
-- The workspace is mounted at `/workspace`.
-- Frontend work lives in `/workspace/frontend`; C/C++ firmware work lives in `/workspace/firmware`.
-- On container creation, `.devcontainer/post-create.sh` creates `frontend/node_modules` and `frontend/.next` and sets them writable by the active container user.
-- Add Next.js and other app dependencies to the frontend project when you initialize it; Node.js and npm are provided by the Node Feature.
-- Run a frontend on `0.0.0.0:3000` to reach it at `http://localhost:43000`.
-- Port `18080` is forwarded for a future service listening on `0.0.0.0:8080`.
-- PostgreSQL is available to the workspace at `rag-db:5432` and to host database tools at `localhost:15432`.
-- C and C++ are compiled for the development computer's architecture in the regular Dev Container.
-- The connection string is available as `DATABASE_URL`.
-- `psql` is installed in the workspace. Connect with `psql "$DATABASE_URL"` and check the extension with `SELECT extversion FROM pg_extension WHERE extname = 'vector';`.
+- `rag-db`: PostgreSQL 17 with pgvector. A new database volume is initialized from `database/schema.sql`.
+- `ollama`: Ollama's local model API. On first start it downloads the model selected by `OLLAMA_MODEL`.
 
-The database starts without application schema. The schema is in `database/schema.sql`; run `./database/reset-db.sh` from the workspace when you want to drop and recreate it. The Dev Container's post-start hook grants the reset script execute permission but does not run it. The reset script also enables `pgvector`.
-
-The database credentials in `.env` are for local development. The Compose file loads that file into both services.
-
-## Raspberry Pi 5
-
-Use a 64-bit operating system on the Pi 5. The Compose file does not pin a platform, so Docker selects native images on the development computer and ARM64 images on the Pi. The Dev Container base image, Node Feature, and pgvector image support ARM64.
-
-The development Compose limits are sized for a regular computer (workspace up to 4 GiB, database up to 1 GiB), not for a 4 GiB production Pi. Before deploying an application to the Pi, build or publish its production image for `linux/arm64` (or as a multi-platform image). This repository currently defines the development workspace and database, not a production application image; size production memory limits for the actual workload and the Pi's RAM.
-
-The regular Dev Container builds C/C++ for the development computer's architecture. A container running on the computer cannot directly access GPIO pins on a separate Pi. For native ARM64 builds and direct hardware access, connect to the Pi with Remote SSH, then start the Pi config from the repository on the Pi with the Dev Container CLI:
+Start both services from the repository root:
 
 ```sh
-devcontainer up --workspace-folder /path/to/slm-rag-pi --config /path/to/slm-rag-pi/.devcontainer/devcontainer.pi.json
+docker compose up -d
+docker compose ps
+docker compose logs -f ollama
 ```
 
-Then use VS Code's **Dev Containers: Attach to Running Container** command in the Remote SSH session. The Pi Compose override passes `/dev/gpiochip0` into the workspace and runs the development container as root; it does not enable broad privileged mode. Raspberry Pi OS must expose the GPIO device. The host interfaces must be enabled before adding the optional I2C, SPI, or UART mappings in `.devcontainer/docker-compose.pi.yml`. The image includes `libgpiod-dev`, `gpiod`, and I2C development tools. Raspberry Pi's current GPIO guidance uses the Linux GPIO character device API (`/dev/gpiochipX`); on Pi 5 the header GPIO controller appears as `gpiochip0` on current Raspberry Pi OS. Older OS/kernel versions may use a different chip number. See the [Raspberry Pi GPIO guidance](https://pip-assets.raspberrypi.com/categories/685-app-notes-guides-whitepapers/documents/RP-006553-WP/A-history-of-GPIO-usage-on-Raspberry-Pi-devices-and-current-best-practices).
+The first Ollama start downloads about 1 GB for the default Q4 model. Its API is available at `http://localhost:11434`; PostgreSQL is available from the host at `localhost:15432`. Containers on this Compose network can connect to PostgreSQL at `rag-db:5432` and Ollama at `ollama:11434`.
+
+The model API uses Ollama's `/api/chat` endpoint. For example:
+
+```sh
+curl http://localhost:11434/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen2.5:1.5b-instruct-q4_K_M","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+Inspect the downloaded and currently loaded model with:
+
+```sh
+docker compose exec ollama ollama list
+docker compose exec ollama ollama ps
+```
+
+## Model quantization and memory
+
+The default is `qwen2.5:1.5b-instruct-q4_K_M` (Q4_K_M weights, about 986 MB). Ollama supports model tags with other quantizations; change `OLLAMA_MODEL` in `.env` to the desired tag and restart the `ollama` service. The selected model is pulled automatically, and downloaded model files persist in the `ollama-models` volume.
+
+The `.env` file controls these limits:
+
+| Setting | Default | Controls |
+| --- | --- | --- |
+| `OLLAMA_MODEL` | `qwen2.5:1.5b-instruct-q4_K_M` | Model and weight quantization |
+| `OLLAMA_MEM_LIMIT` | `2500m` | Hard container RAM limit |
+| `OLLAMA_CONTEXT_LENGTH` | `2048` | Context window; larger values need more memory |
+| `OLLAMA_NUM_PARALLEL` | `1` | Concurrent requests per model |
+| `OLLAMA_MAX_LOADED_MODELS` | `1` | Models held in memory at once |
+| `OLLAMA_KEEP_ALIVE` | `5m` | Time a model stays loaded after a request |
+| `OLLAMA_KV_CACHE_TYPE` | `q8_0` | KV cache precision; use `f16` for higher precision or `q4_0` to reduce cache RAM further |
+
+The Ollama container also enables Flash Attention and disables cloud features. After editing `.env`, apply changes with `docker compose up -d`. Increase `OLLAMA_MEM_LIMIT` when selecting a model with larger weights or a longer context. These defaults target CPU inference on a memory-constrained Raspberry Pi; GPU passthrough is not configured.
+
+## Database
+
+The connection string for host tools is set in `.env` as `DATABASE_URL`. `psql` can connect with:
+
+```sh
+psql "$DATABASE_URL"
+```
+
+For an application container on the Compose network, use the `rag-db` hostname and port `5432` instead of `localhost:15432`.
+
+The database schema is initialized automatically when Compose creates a new data volume. For an existing database, `database/reset-db.sh` drops and recreates the `public` schema; it is destructive. Check the Compose `.env` database settings before running it. From a host Bash shell, the script starts `rag-db` if needed and runs `psql` through Docker Compose, so `psql` does not need to be installed on the host and you do not need to open an interactive container shell.
 
 ## Firmware
 
